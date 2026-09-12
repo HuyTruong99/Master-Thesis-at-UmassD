@@ -1,0 +1,436 @@
+Global String g_Axis$
+Global Double g_Distance
+
+Global Integer g_Moving
+Global Integer g_Done
+Global Integer g_MotionError
+
+Global Integer g_SupervisorHold
+Global Integer g_StopRequested
+Global Integer g_StopDone
+Global Integer g_StopError
+
+
+Function main
+
+    String cmd$
+    String value$
+    String axis$
+
+    Double distance
+    Double maxMove
+
+    ' RC+ backup per-command distance limit.
+    ' The virtual-wall policy itself lives in Python/JSON.
+    maxMove = 100
+
+    g_Axis$ = ""
+    g_Distance = 0
+
+    g_Moving = 0
+    g_Done = 0
+    g_MotionError = 0
+
+    g_SupervisorHold = 0
+    g_StopRequested = 0
+    g_StopDone = 0
+    g_StopError = 0
+
+
+    ' ==========================================
+    ' NETWORK
+    ' ==========================================
+
+    SetNet #201, "192.168.1.10", 2000, CRLF, NONE, 0
+
+    OpenNet #201 As Server
+
+    Print "WAITING FOR PYTHON..."
+    WaitNet #201
+
+    Print "PYTHON CONNECTED"
+    Print #201, "SERVER READY"
+
+
+    ' ==========================================
+    ' ROBOT SETUP
+    ' ==========================================
+
+    Robot 1
+    Tool 1
+
+    Motor On
+    Power Low
+
+    SpeedS 10
+    AccelS 10, 10
+
+    Print "ROBOT READY"
+    Print #201, "ROBOT READY"
+
+
+    ' ==========================================
+    ' MAIN LOOP
+    ' ==========================================
+
+    Do
+
+        ' --------------------------------------
+        ' CONTINUOUS CONTROLLER POSITION
+        ' --------------------------------------
+
+        If g_Moving = 1 Then
+
+            P99 = CurPos
+
+            Print #201, "POS,", CX(P99), ",", CY(P99), ",", CZ(P99), ",", CU(P99), ",", CV(P99), ",", CW(P99)
+
+        EndIf
+
+
+        ' --------------------------------------
+        ' MOTION COMPLETE / ABORTED
+        ' --------------------------------------
+
+        If g_Done = 1 Then
+
+            If g_MotionError = 0 Then
+
+                Print #201, "DONE,", g_Axis$, ",", g_Distance
+
+            Else
+
+                Print #201, "MOTION_ABORTED,", g_MotionError
+
+            EndIf
+
+            P99 = Here
+
+            Print #201, "POS,", CX(P99), ",", CY(P99), ",", CZ(P99), ",", CU(P99), ",", CV(P99), ",", CW(P99)
+
+            g_Done = 0
+            g_StopRequested = 0
+
+        EndIf
+
+
+        ' --------------------------------------
+        ' STOP TASK RESULT
+        ' --------------------------------------
+
+        If g_StopDone = 1 Then
+
+            If g_StopError = 0 Then
+
+                Print #201, "SUPERVISOR_HOLD,STOP_COMPLETE"
+
+            Else
+
+                Print #201, "SUPERVISOR_HOLD,STOP_ERROR,", g_StopError
+
+            EndIf
+
+            g_StopDone = 0
+
+        EndIf
+
+
+        ' --------------------------------------
+        ' RECEIVE COMMAND
+        ' --------------------------------------
+
+        If ChkNet(201) > 0 Then
+
+            Line Input #201, cmd$
+
+            Print "Received: ", cmd$
+
+
+            ' ==================================
+            ' SOFTWARE SUPERVISOR STOP
+            ' ==================================
+
+            If UCase$(cmd$) = "SUPERVISOR_STOP" Or UCase$(cmd$) = "SAFE_MODE" Or UCase$(cmd$) = "STOP" Then
+
+                g_SupervisorHold = 1
+
+                Print #201, "SUPERVISOR_HOLD,ACTIVE"
+
+                If g_Moving = 1 Then
+
+                    If g_StopRequested = 0 Then
+
+                        g_StopRequested = 1
+                        g_StopDone = 0
+                        g_StopError = 0
+
+                        Print #201, "SUPERVISOR_HOLD,ABORT_REQUESTED"
+
+                        Xqt 3, StopTask
+
+                    EndIf
+
+                Else
+
+                    Print #201, "SUPERVISOR_HOLD,NO_MOTION"
+
+                EndIf
+
+
+            Else
+
+
+                ' ==================================
+                ' RESET SOFTWARE SUPERVISOR HOLD
+                ' ==================================
+
+                If UCase$(cmd$) = "RESET_SUPERVISOR_HOLD" Or UCase$(cmd$) = "RESET_SAFE_MODE" Then
+
+                    If g_Moving = 0 Then
+
+                        g_SupervisorHold = 0
+                        g_StopRequested = 0
+
+                        Print #201, "SUPERVISOR_HOLD,RESET"
+
+                    Else
+
+                        Print #201, "REJECT,ROBOT_BUSY"
+
+                    EndIf
+
+
+                Else
+
+
+                    ' ==================================
+                    ' GET POSITION
+                    ' ==================================
+
+                    If UCase$(cmd$) = "GET_POSITION" Then
+
+                        P99 = Here
+
+                        Print #201, "POS,", CX(P99), ",", CY(P99), ",", CZ(P99), ",", CU(P99), ",", CV(P99), ",", CW(P99)
+
+
+                    Else
+
+
+                        ' ==================================
+                        ' GET STATE
+                        ' ==================================
+
+                        If UCase$(cmd$) = "GET_STATE" Then
+
+                            Print #201, "STATE,MOVING,", g_Moving, ",SUPERVISOR_HOLD,", g_SupervisorHold
+
+
+                        Else
+
+
+                            ' ==================================
+                            ' HOLD BLOCKS NEW MOTION
+                            ' ==================================
+
+                            If g_SupervisorHold = 1 Then
+
+                                Print #201, "REJECT,SUPERVISOR_HOLD_ACTIVE"
+
+
+                            Else
+
+
+                                If g_Moving = 1 Then
+
+                                    Print #201, "REJECT,ROBOT_BUSY"
+
+
+                                Else
+
+                                    axis$ = ""
+                                    distance = 0
+
+
+                                    ' MOVE X
+
+                                    If Left$(UCase$(cmd$), 7) = "MOVE_X," Then
+
+                                        axis$ = "X"
+                                        value$ = Mid$(cmd$, 8)
+                                        distance = Val(value$)
+
+
+                                    Else
+
+
+                                        ' MOVE Y
+
+                                        If Left$(UCase$(cmd$), 7) = "MOVE_Y," Then
+
+                                            axis$ = "Y"
+                                            value$ = Mid$(cmd$, 8)
+                                            distance = Val(value$)
+
+
+                                        Else
+
+
+                                            ' MOVE Z
+
+                                            If Left$(UCase$(cmd$), 7) = "MOVE_Z," Then
+
+                                                axis$ = "Z"
+                                                value$ = Mid$(cmd$, 8)
+                                                distance = Val(value$)
+
+                                            EndIf
+
+                                        EndIf
+
+                                    EndIf
+
+
+                                    ' ==================================
+                                    ' RC+ BACKUP VALIDATION
+                                    ' ==================================
+
+                                    If axis$ = "" Then
+
+                                        Print #201, "REJECT,UNKNOWN_COMMAND"
+
+
+                                    Else
+
+
+                                        If distance = 0 Then
+
+                                            Print #201, "REJECT,ZERO_DISTANCE"
+
+
+                                        Else
+
+
+                                            If Abs(distance) > maxMove Then
+
+                                                Print #201, "REJECT,DISTANCE_LIMIT"
+
+
+                                            Else
+
+                                                P99 = Here
+
+                                                Print #201, "POS,", CX(P99), ",", CY(P99), ",", CZ(P99), ",", CU(P99), ",", CV(P99), ",", CW(P99)
+
+                                                g_Axis$ = axis$
+                                                g_Distance = distance
+
+                                                g_MotionError = 0
+                                                g_Done = 0
+                                                g_Moving = 1
+
+                                                g_StopRequested = 0
+                                                g_StopDone = 0
+                                                g_StopError = 0
+
+                                                Print #201, "START,", g_Axis$, ",", g_Distance
+
+                                                Xqt 2, MotionTask
+
+                                            EndIf
+
+                                        EndIf
+
+                                    EndIf
+
+                                EndIf
+
+                            EndIf
+
+                        EndIf
+
+                    EndIf
+
+                EndIf
+
+            EndIf
+
+        EndIf
+
+
+        ' About 10 Hz
+        Wait 0.1
+
+    Loop
+
+Fend
+
+
+
+' ============================================================
+' TASK 2 - ROBOT MOTION
+' ============================================================
+
+Function MotionTask
+
+    OnErr GoTo MotionError
+
+    Robot 1
+    Tool 1
+
+    Power Low
+    SpeedS 10
+    AccelS 10, 10
+
+    P98 = Here
+
+    If g_Axis$ = "X" Then
+        Move P98 +X(g_Distance)
+    EndIf
+
+    If g_Axis$ = "Y" Then
+        Move P98 +Y(g_Distance)
+    EndIf
+
+    If g_Axis$ = "Z" Then
+        Move P98 +Z(g_Distance)
+    EndIf
+
+    g_Moving = 0
+    g_Done = 1
+
+    Exit Function
+
+
+MotionError:
+
+    g_MotionError = Err
+    g_Moving = 0
+    g_Done = 1
+
+Fend
+
+
+
+' ============================================================
+' TASK 3 - SOFTWARE MOTION ABORT
+' ============================================================
+
+Function StopTask
+
+    OnErr GoTo StopError
+
+    AbortMotion 1
+
+    g_StopError = 0
+    g_StopDone = 1
+
+    Exit Function
+
+
+StopError:
+
+    g_StopError = Err
+    g_StopDone = 1
+
+Fend
