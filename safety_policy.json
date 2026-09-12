@@ -1,0 +1,23 @@
+{
+  "policy_name": "record_derived_xyz_virtual_box_v2",
+  "mode": "monitor",
+  "max_move_mm": 100,
+  "workspace": {
+    "x_min": -200,
+    "x_max": 860,
+    "y_min": 300,
+    "y_max": 670,
+    "z_min": 40,
+    "z_max": 410
+  },
+  "runtime_stop": {
+    "x_min": -180,
+    "x_max": 840,
+    "y_min": 320,
+    "y_max": 650,
+    "z_min": 60,
+    "z_max": 390
+  },
+  "warning_margin_mm": 10,
+  "auto_supervisor_stop": false
+}
