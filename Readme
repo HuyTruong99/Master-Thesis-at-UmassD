@@ -1,0 +1,185 @@
+Cybersecurity for a Robotic Arm with LLM Control
+
+Master's thesis project at the University of Massachusetts Dartmouth.
+
+This repository contains a runtime safety supervisor for an Epson 6-DOF robot arm controlled from Python over TCP/IP. The supervisor sits between the operator (and eventually an LLM) and the robot controller, and checks every motion command against a configurable "virtual wall" safety policy before and during motion. Every event is logged to CSV for experimental analysis.
+
+    Safety notice: The virtual-wall states in this project are an experimental software policy. They are not an Epson manufacturer safety function and do not replace certified safety hardware (e-stops, safety fences, light curtains). Always run tests at low power with a hand on the emergency stop.
+
+Architecture
+
+text
+ Operator / LLM
+      |
+      |  natural language ("move right 20 mm")
+      v
++-------------------------------+
+|  runtime_safety_supervisor.py |   Python (laptop 192.168.1.10)
+|  - command parser             |
+|  - pre-actuation validation   |<---- safety_policy.json
+|  - runtime virtual-wall check |
+|  - CSV logger                 |----> robot_position.csv
++-------------------------------+
+      |  TCP :2000  (MOVE_X,20 / SUPERVISOR_STOP / GET_POSITION ...)
+      v
++-------------------------------+
+|  rc+  (SPEL+ program, RC+7)   |   Epson controller (192.168.1.6)
+|  Task 1: network + telemetry  |
+|  Task 2: MotionTask (Move)    |
+|  Task 3: StopTask (Abort)     |
++-------------------------------+
+      |
+      v
+   Epson 6-DOF arm
+
+Safety is enforced in two layers:
+
+    Python supervisor – full virtual-wall policy, predicted-target check, direction-aware runtime monitoring, optional automatic stop.
+
+    RC+ controller – backup checks: per-command distance limit (100 mm), zero-distance rejection, busy rejection, and a supervisor hold that blocks new motion until reset.
+
+Repository contents
+File	Language	Purpose
+runtime_safety_supervisor.py	Python 3	Operator console, command parser, safety validation, runtime monitoring, CSV logging
+safety_policy.json	JSON	Virtual-wall policy: workspace box, runtime stop box, warning margin, mode
+rc+	Epson SPEL+	Multitasking RC+7 server program that executes moves, streams position, and aborts motion on request
+Requirements
+
+Hardware
+
+    Epson 6-axis robot with an RC+7 controller
+
+    Ethernet connection between the laptop and the controller
+
+Software
+
+    Epson RC+ 7.x
+
+    Python 3.8+ (standard library only – no pip install needed)
+
+Network (default values)
+Device	IP	Port
+Laptop (Python)	192.168.1.10	–
+RC+7 controller	192.168.1.6	2000
+
+Change ROBOT_IP / PORT in runtime_safety_supervisor.py and the SetNet #201 line in rc+ if your network differs.
+Quick start
+
+    Load the RC+ program. Create a project in Epson RC+ 7, paste the contents of rc+ into Main.prg, build, and run. The console should print WAITING FOR PYTHON....
+
+    Check the policy. Edit safety_policy.json for your cell (see below). Start in monitor mode.
+
+    Run the supervisor.
+
+    bash
+    python runtime_safety_supervisor.py
+
+    The script prints the active policy and its SHA-256 hash, connects to RC+, and requests the current position.
+
+    Send commands at the Command: prompt.
+
+Operator commands
+Input	Result
+move right 20 mm / move left 20 mm	±X
+move forward 20 mm / move backward 20 mm	±Y
+move up 20 mm / move down 20 mm	±Z
+x 20, y -15, z 10	Signed move on an axis
+get position / where am i	Request current position
+stop / safe mode	Software supervisor hold (aborts active motion)
+reset	Clear supervisor hold (only when the robot is idle)
+quit / exit	Close the connection and save the CSV
+Safety policy
+
+safety_policy.json:
+
+json
+{
+  "policy_name": "record_derived_xyz_virtual_box_v2",
+  "mode": "monitor",
+  "max_move_mm": 100,
+  "workspace":    { "x_min": -200, "x_max": 860, "y_min": 300, "y_max": 670, "z_min": 40, "z_max": 410 },
+  "runtime_stop": { "x_min": -180, "x_max": 840, "y_min": 320, "y_max": 650, "z_min": 60, "z_max": 390 },
+  "warning_margin_mm": 10,
+  "auto_supervisor_stop": false
+}
+
+All values are in millimetres in the robot base frame. The script validates that
+workspace_min < stop_min < stop_max < workspace_max for every axis.
+Zones (per axis)
+
+text
+workspace_min   stop_min   stop_min+margin      stop_max-margin   stop_max   workspace_max
+     |-- OUTSIDE --|-- STOP_ZONE --|-- WARNING --|---- SAFE ----|-- WARNING --|-- STOP_ZONE --|-- OUTSIDE --|
+
+Modes
+Mode	Pre-actuation check	Runtime monitoring	Automatic stop
+measure	Distance limit + workspace	Off (position logging only)	No
+monitor	Distance limit + workspace; stop-zone targets allowed as UNSAFE_TEST_ALLOWED	Warnings and threshold crossings are logged	No
+enforce	Also blocks targets inside the stop zone	Warnings and threshold crossings are logged	Yes, if auto_supervisor_stop: true
+
+The policy hash is written to every CSV row, so each trial can be traced back to the exact policy it ran under.
+TCP protocol
+
+Python → RC+
+Message	Meaning
+MOVE_X,<mm> / MOVE_Y,<mm> / MOVE_Z,<mm>	Relative linear move
+GET_POSITION	Request current pose
+GET_STATE	Request moving / hold flags
+SUPERVISOR_STOP (also SAFE_MODE, STOP)	Enter hold and abort motion
+RESET_SUPERVISOR_HOLD (also RESET_SAFE_MODE)	Clear hold
+
+RC+ → Python
+Message	Meaning
+POS,x,y,z,u,v,w	Current pose (streamed at ~10 Hz while moving)
+START,<axis>,<mm>	Motion started
+DONE,<axis>,<mm>	Motion finished normally
+MOTION_ABORTED,<err>	Motion aborted
+SUPERVISOR_HOLD,<state>	ACTIVE, ABORT_REQUESTED, NO_MOTION, STOP_COMPLETE, STOP_ERROR, RESET
+REJECT,<reason>	UNKNOWN_COMMAND, ZERO_DISTANCE, DISTANCE_LIMIT, ROBOT_BUSY, SUPERVISOR_HOLD_ACTIVE
+STATE,MOVING,<0/1>,SUPERVISOR_HOLD,<0/1>	Reply to GET_STATE
+Data logging
+
+All events are appended to robot_position.csv next to the script. If an older file has a different header, it is backed up automatically as robot_position_backup_<timestamp>.csv.
+
+Key columns:
+Column	Description
+Column	Description
+session_id, policy_name, policy_sha256, policy_mode	Experiment traceability
+trial_id, sample_index, elapsed_ms	Per-command trial and sample timing
+event	COMMAND_SENT, COMMAND_BLOCKED, MOVE_START, POSITION, RUNTIME_WARNING, RUNTIME_STOP_THRESHOLD, WORKSPACE_VIOLATION, SUPERVISOR_HOLD_REQUESTED, MOTION_ABORTED, STOPPED_FINAL_POSITION, MOVE_DONE, RC_REJECT, ...
+predicted_x/y/z	Predicted target before actuation
+x, y, z, u, v, w	Measured pose
+command_safety	SAFE, CAUTION, UNSAFE_TEST_ALLOWED, UNSAFE
+virtual_wall_state	SAFE, WARNING, STOP_ZONE, OUTSIDE_WORKSPACE
+runtime_intervention_state	NONE, WARNING, STOP_THRESHOLD, WORKSPACE_VIOLATION, STOP_REQUESTED, ABORTED, STOPPED
+stop_response_ms	Time from stop request to MOTION_ABORTED
+post_stop_travel_mm	Distance travelled after the stop request
+threshold_overshoot_mm	Distance past the stop threshold at the final position
+
+    Close the CSV in Excel while the script is running, otherwise writes will fail.
+
+Robot motion settings (RC+)
+
+    Power Low, SpeedS 10 (mm/s), AccelS 10, 10
+
+    Linear Move relative to the current position (Here)
+
+    Controller-side per-command limit: 100 mm
+
+Known limitations
+
+    Virtual walls are enforced in Python only; RC+ checks the distance limit but not the workspace box.
+
+    The TCP link has no authentication or encryption.
+
+    Position telemetry is ~10 Hz, which bounds the resolution of stop-timing metrics (~1 mm at 10 mm/s).
+
+    The natural-language parser is rule-based; LLM command interpretation is developed in the companion repository.
+
+Related repository
+
+    Epson-Robotic-Arm-6-DOF – development history, LLM command interpreter, and Intel RealSense camera experiments.
+
+Author
+
+Huy Truong – University of Massachusetts Dartmouth
